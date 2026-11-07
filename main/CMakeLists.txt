@@ -1,3 +1,5 @@
-idf_component_register(SRCS "main.c"
-                    INCLUDE_DIRS
-                    Requires led consola pulsador bme280 ".")
+idf_component_register(
+    SRCS "main.c"
+    INCLUDE_DIRS "."
+    PRIV_REQUIRES led pulsador bme280 consola
+)
