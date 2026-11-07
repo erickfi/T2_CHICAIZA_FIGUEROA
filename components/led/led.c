@@ -1,157 +1,421 @@
+
 #include "led.h"
-#include "driver/gpio.h"
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "driver/ledc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
-#include "esp_timer.h"
 #include "esp_log.h"
 
-static const char *TAG = "LED";
+static const char *TAG = "LEDC";
 
-/* Estos datos son PRIVADOS del componente. */
-static SemaphoreHandle_t s_mutex = NULL;
-static gpio_num_t s_gpio;
-static int s_nivel_encendido;
-static uint32_t s_periodo_ms;
+/* Configuracion de P3. */
+#define LEDC_FRECUENCIA_HZ       5000U
+#define LEDC_RESOLUCION_BITS    13U
+#define LEDC_DUTY_TOTAL         (1U << LEDC_RESOLUCION_BITS)
+#define LEDC_TIEMPO_FADE_MS     1500U
+
+#define LEDC_MODO              LEDC_LOW_SPEED_MODE
+#define LEDC_TEMPORIZADOR      LEDC_TIMER_0
+#define LEDC_CANAL             LEDC_CHANNEL_0
+
+/* Recursos FreeRTOS. */
+#define LED_COLA_LONGITUD      12U
+#define LED_TAREA_PILA_BYTES   4096U
+#define LED_TAREA_PRIORIDAD    5U
+
+typedef enum {
+    ORDEN_FIJAR_MODO,
+    ORDEN_SIGUIENTE_MODO
+} led_orden_tipo_t;
+
+typedef struct {
+    led_orden_tipo_t tipo;
+    led_modo_t modo;
+} led_orden_t;
+
+static QueueHandle_t s_cola = NULL;
+static SemaphoreHandle_t s_mutex_estado = NULL;
+
+/* Solo la tarea LEDC modifica estas variables. */
 static led_modo_t s_modo = LED_MODO_APAGADO;
-static bool s_encendido = false;
+static uint32_t s_duty_objetivo = 0U;
 
-static esp_err_t escribir_led(bool encender)
+static const char *nombre_modo(led_modo_t modo)
 {
-    int nivel = encender ? s_nivel_encendido : 1 - s_nivel_encendido;
-    esp_err_t error = gpio_set_level(s_gpio, nivel);
-    if (error == ESP_OK) {
-        s_encendido = encender;
+    switch (modo) {
+        case LED_MODO_APAGADO:
+            return "apagado";
+        case LED_MODO_INTERMEDIO:
+            return "intermedio";
+        case LED_MODO_ENCENDIDO:
+            return "encendido";
+        case LED_MODO_TRANSICION:
+            return "transicion";
+        default:
+            return "desconocido";
     }
-    return error;
 }
 
-static void tarea_led(void *argumento)
+static led_modo_t siguiente_modo(led_modo_t actual)
+{
+    switch (actual) {
+        case LED_MODO_APAGADO:
+            return LED_MODO_INTERMEDIO;
+        case LED_MODO_INTERMEDIO:
+            return LED_MODO_ENCENDIDO;
+        case LED_MODO_ENCENDIDO:
+            return LED_MODO_TRANSICION;
+        case LED_MODO_TRANSICION:
+        default:
+            return LED_MODO_APAGADO;
+    }
+}
+
+/*
+ * Funcion privada. Solo la invoca la tarea LEDC.
+ * Detener el fade evita que una escritura de duty
+ * tenga que esperar a que termine la transicion.
+ */
+static esp_err_t fijar_duty(uint32_t duty)
+{
+    esp_err_t err = ledc_fade_stop(
+        LEDC_MODO,
+        LEDC_CANAL
+    );
+
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    return ledc_set_duty_and_update(
+        LEDC_MODO,
+        LEDC_CANAL,
+        duty,
+        0
+    );
+}
+
+/*
+ * Transicion 0 % -> 100 %.
+ * El hardware realiza los pasos autonomamente.
+ */
+static esp_err_t iniciar_transicion(void)
+{
+    /* Apagar el LED y detener el fade anterior. */
+    esp_err_t err = fijar_duty(0U);
+
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    /* Mantener el LED apagado para hacer
+       perceptible el inicio de la transicion. */
+    vTaskDelay(pdMS_TO_TICKS(400));
+
+    /* Iniciar el aumento progresivo de brillo. */
+    return ledc_set_fade_time_and_start(
+        LEDC_MODO,
+        LEDC_CANAL,
+        LEDC_DUTY_TOTAL,
+        LEDC_TIEMPO_FADE_MS,
+        LEDC_FADE_NO_WAIT
+    );
+}
+
+/*
+ * Aplica un modo y actualiza el estado solo si
+ * las operaciones del controlador han tenido exito.
+ */
+static esp_err_t aplicar_modo(led_modo_t modo)
+{
+    esp_err_t err = ESP_OK;
+    uint32_t objetivo = 0U;
+
+    switch (modo) {
+        case LED_MODO_APAGADO:
+            objetivo = 0U;
+            err = fijar_duty(objetivo);
+            break;
+
+        case LED_MODO_INTERMEDIO:
+            objetivo = LEDC_DUTY_TOTAL / 2U;
+            err = fijar_duty(objetivo);
+            break;
+
+        case LED_MODO_ENCENDIDO:
+            objetivo = LEDC_DUTY_TOTAL;
+            err = fijar_duty(objetivo);
+            break;
+
+        case LED_MODO_TRANSICION:
+            objetivo = LEDC_DUTY_TOTAL;
+            err = iniciar_transicion();
+            break;
+
+        default:
+            return ESP_ERR_INVALID_ARG;
+    }
+
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    /* Se protege la copia que consultan otras tareas. */
+    xSemaphoreTake(s_mutex_estado, portMAX_DELAY);
+
+    s_modo = modo;
+    s_duty_objetivo = objetivo;
+
+    xSemaphoreGive(s_mutex_estado);
+
+    ESP_LOGI(
+        TAG,
+        "Modo: %s; duty objetivo: %lu/%lu",
+        nombre_modo(modo),
+        (unsigned long)objetivo,
+        (unsigned long)LEDC_DUTY_TOTAL
+    );
+
+    return ESP_OK;
+}
+
+/*
+ * Unica tarea que controla el canal LEDC.
+ * No realiza espera activa: se bloquea en la cola.
+ */
+static void tarea_ledc(void *argumento)
 {
     (void)argumento;
-    const TickType_t medio_periodo = pdMS_TO_TICKS(s_periodo_ms / 2U);
-    TickType_t ultimo_despertar = xTaskGetTickCount();
 
-    while (true) {
-        bool hay_traza = false;
-        bool encendido = false;
-        int64_t instante_us = 0;
+    led_orden_t orden;
 
-        if (xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE) {
-            if (s_modo == LED_MODO_PARPADEO) {
-                if (escribir_led(!s_encendido) == ESP_OK) {
-                    instante_us = esp_timer_get_time();
-                    encendido = s_encendido;
-                    hay_traza = true;
-                }
-            }
-            xSemaphoreGive(s_mutex);
+    for (;;) {
+        if (xQueueReceive(
+                s_cola,
+                &orden,
+                portMAX_DELAY
+            ) != pdTRUE) {
+            continue;
         }
 
-        /* El registro se hace en contexto de tarea y fuera del mutex. */
-        if (hay_traza) {
-            ESP_LOGI(TAG, "Conmutacion: %s; t=%lld us",
-                     encendido ? "ON" : "OFF", (long long)instante_us);
+        led_modo_t destino;
+
+        if (orden.tipo == ORDEN_SIGUIENTE_MODO) {
+            /* s_modo solo lo modifica esta tarea. */
+            destino = siguiente_modo(s_modo);
+        } else {
+            destino = orden.modo;
         }
 
-        /* Espera periodica: evita sumar el trabajo del bucle al periodo. */
-        xTaskDelayUntil(&ultimo_despertar, medio_periodo);
+        esp_err_t err = aplicar_modo(destino);
+
+        if (err != ESP_OK) {
+            ESP_LOGE(
+                TAG,
+                "Error aplicando modo: %s",
+                esp_err_to_name(err)
+            );
+        }
     }
 }
 
 esp_err_t led_iniciar(const led_config_t *config)
 {
-    if (config == NULL || s_mutex != NULL ||
-        (int)config->gpio < 0 || (int)config->gpio >= 64 ||
-        (config->nivel_encendido != 0 && config->nivel_encendido != 1) ||
-        config->periodo_ms < 2U || (config->periodo_ms % 2U) != 0U ||
-        pdMS_TO_TICKS(config->periodo_ms / 2U) == 0) {
+    if (config == NULL ||
+        (config->nivel_encendido != 0 &&
+         config->nivel_encendido != 1)) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    gpio_config_t gpio_cfg = {
-        .pin_bit_mask = (1ULL << config->gpio),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
+    if (s_cola != NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /*
+     * El temporizador necesita:
+     * 5000 * 8192 = 40,96 MHz.
+     */
+    ledc_timer_config_t temporizador = {
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .timer_num = LEDC_TIMER_0,
+        .duty_resolution = LEDC_TIMER_13_BIT,
+        .freq_hz = 5000,
+        .clk_cfg = LEDC_AUTO_CLK
     };
 
-    esp_err_t error = gpio_config(&gpio_cfg);
-    if (error != ESP_OK) {
-        return error;
+    esp_err_t err = ledc_timer_config(&temporizador);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(
+            TAG,
+            "Error configurando temporizador: %s",
+            esp_err_to_name(err)
+        );
+        return err;
     }
 
-    s_gpio = config->gpio;
-    s_nivel_encendido = config->nivel_encendido;
-    s_periodo_ms = config->periodo_ms;
+    /*
+     * El canal LEDC ocupa el GPIO del LED.
+     * No se configura tambien como GPIO digital.
+     *
+     * output_invert permite respetar un montaje
+     * con LED activo en nivel bajo.
+     */
+    ledc_channel_config_t canal = {
+        .gpio_num = config->gpio,
+        .speed_mode = LEDC_MODO,
+        .channel = LEDC_CANAL,
+        .timer_sel = LEDC_TEMPORIZADOR,
+        .duty = 0U,
+        .hpoint = 0,
+        .flags.output_invert =
+            (config->nivel_encendido == 0)
+    };
+
+    err = ledc_channel_config(&canal);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(
+            TAG,
+            "Error configurando canal: %s",
+            esp_err_to_name(err)
+        );
+        return err;
+    }
+
+    /*
+     * El servicio de fade se instala una vez.
+     * El resto de llamadas a LEDC seran
+     * realizadas por la tarea propietaria.
+     */
+    err = ledc_fade_func_install(0);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(
+            TAG,
+            "Error instalando fade: %s",
+            esp_err_to_name(err)
+        );
+        return err;
+    }
+
+    s_mutex_estado = xSemaphoreCreateMutex();
+
+    if (s_mutex_estado == NULL) {
+        err = ESP_ERR_NO_MEM;
+        goto error_fade;
+    }
+
+    s_cola = xQueueCreate(
+        LED_COLA_LONGITUD,
+        sizeof(led_orden_t)
+    );
+
+    if (s_cola == NULL) {
+        err = ESP_ERR_NO_MEM;
+        goto error_mutex;
+    }
+
     s_modo = LED_MODO_APAGADO;
+    s_duty_objetivo = 0U;
 
-    error = escribir_led(false);
-    if (error != ESP_OK) {
-        return error;
+    if (xTaskCreate(
+            tarea_ledc,
+            "tarea_ledc",
+            LED_TAREA_PILA_BYTES,
+            NULL,
+            LED_TAREA_PRIORIDAD,
+            NULL
+        ) != pdPASS) {
+        err = ESP_ERR_NO_MEM;
+        goto error_cola;
     }
 
-    s_mutex = xSemaphoreCreateMutex();
-    if (s_mutex == NULL) {
-        return ESP_ERR_NO_MEM;
+    ESP_LOGI(
+        TAG,
+        "LEDC GPIO=%d, PWM=%lu Hz, resolucion=%u bits",
+        (int)config->gpio,
+        (unsigned long)LEDC_FRECUENCIA_HZ,
+        (unsigned)LEDC_RESOLUCION_BITS
+    );
+
+    return ESP_OK;
+
+error_cola:
+    vQueueDelete(s_cola);
+    s_cola = NULL;
+
+error_mutex:
+    vSemaphoreDelete(s_mutex_estado);
+    s_mutex_estado = NULL;
+
+error_fade:
+    ledc_fade_func_uninstall();
+    return err;
+}
+
+/* Todas las ordenes entran en la misma cola. */
+static esp_err_t enviar_orden(const led_orden_t *orden)
+{
+    if (s_cola == NULL) {
+        return ESP_ERR_INVALID_STATE;
     }
 
-    s_modo = LED_MODO_PARPADEO;
-    if (xTaskCreate(tarea_led, "tarea_led", 3072, NULL, 5, NULL) != pdPASS) {
-        s_modo = LED_MODO_APAGADO;
-        vSemaphoreDelete(s_mutex);
-        s_mutex = NULL;
-        return ESP_ERR_NO_MEM;
+    if (xQueueSend(s_cola, orden, 0) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
     }
 
-    ESP_LOGI(TAG, "GPIO=%d; activo=%d; periodo=%lu ms",
-             (int)s_gpio, s_nivel_encendido, (unsigned long)s_periodo_ms);
     return ESP_OK;
 }
 
 esp_err_t led_fijar_modo(led_modo_t modo)
 {
-    if (s_mutex == NULL) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (modo != LED_MODO_APAGADO && modo != LED_MODO_ENCENDIDO &&
-        modo != LED_MODO_PARPADEO) {
+    if (modo < LED_MODO_APAGADO ||
+        modo > LED_MODO_TRANSICION) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    esp_err_t error = ESP_OK;
+    led_orden_t orden = {
+        .tipo = ORDEN_FIJAR_MODO,
+        .modo = modo
+    };
 
-    if (modo == LED_MODO_APAGADO) {
-        error = escribir_led(false);
-    } else if (modo == LED_MODO_ENCENDIDO) {
-        error = escribir_led(true);
-    } else if (s_modo != LED_MODO_PARPADEO) {
-        /* Cada retorno al parpadeo comienza con LED apagado. */
-        error = escribir_led(false);
-    }
+    return enviar_orden(&orden);
+}
 
-    if (error == ESP_OK) {
-        s_modo = modo;
-    }
-    xSemaphoreGive(s_mutex);
-    return error;
+esp_err_t led_siguiente_modo(void)
+{
+    led_orden_t orden = {
+        .tipo = ORDEN_SIGUIENTE_MODO,
+        .modo = LED_MODO_APAGADO
+    };
+
+    return enviar_orden(&orden);
 }
 
 esp_err_t led_obtener_estado(led_estado_t *estado)
 {
-    if (s_mutex == NULL) {
-        return ESP_ERR_INVALID_STATE;
-    }
     if (estado == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (s_mutex_estado == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    xSemaphoreTake(s_mutex_estado, portMAX_DELAY);
+
     estado->modo = s_modo;
-    estado->encendido = s_encendido;
-    estado->periodo_ms = s_periodo_ms;
-    xSemaphoreGive(s_mutex);
+    estado->duty_objetivo = s_duty_objetivo;
+    estado->frecuencia_hz = LEDC_FRECUENCIA_HZ;
+    estado->resolucion_bits = LEDC_RESOLUCION_BITS;
+
+    xSemaphoreGive(s_mutex_estado);
+
     return ESP_OK;
 }
