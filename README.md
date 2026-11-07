@@ -1,6 +1,6 @@
-# TALLER 1 - Periféricos: GPIO, I2C y UART
+# TALLER 2 - tareas, prioridades y temporización
 
-**Proyecto:** T1_CHICAIZA_FIGUEROA
+**Proyecto:** T2_CHICAIZA_FIGUEROA
 
 **Curso:** 2026-27
 
