@@ -109,7 +109,7 @@ static const comando_t comandos[] = {
         "led",
         "led off|medio|on|fade|next   Controla LEDC",
         comando_led
-    }
+    },
   
     {
         "carga",
