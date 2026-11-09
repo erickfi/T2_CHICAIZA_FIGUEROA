@@ -194,47 +194,6 @@ static esp_err_t leer_muestra(bme280_estado_t *muestra)
            ESP_OK : ESP_ERR_INVALID_RESPONSE;
 }
 
-static void tarea_bme280(void *argumento)
-{
-    (void)argumento;
-    /* Tras entrar en modo normal se espera a la primera conversion. */
-    vTaskDelay(pdMS_TO_TICKS(25));
-    TickType_t proximo = xTaskGetTickCount();
-    const TickType_t periodo = pdMS_TO_TICKS(s_periodo_ms);
-
-    for (;;) {
-        bme280_estado_t lectura = {0};
-        esp_err_t err = leer_muestra(&lectura);
-        xSemaphoreTake(s_mutex, portMAX_DELAY);
-        if (err == ESP_OK) {
-            s_estado.temperatura_c = lectura.temperatura_c;
-            s_estado.presion_hpa = lectura.presion_hpa;
-            s_estado.humedad_pct = lectura.humedad_pct;
-            s_estado.instante_us = lectura.instante_us;
-            s_estado.muestra_valida = true;
-        } else {
-            s_estado.muestra_valida = false;
-            ++s_estado.errores_lectura;
-        }
-        xSemaphoreGive(s_mutex);
-
-        if (err == ESP_OK) {
-            if (s_estado.id == ID_BME280) {
-                ESP_LOGI(TAG, "T=%.2f C, P=%.2f hPa, HR=%.2f %%; t=%lld us",
-                         (double)lectura.temperatura_c, (double)lectura.presion_hpa,
-                         (double)lectura.humedad_pct, (long long)lectura.instante_us);
-            } else {
-                ESP_LOGI(TAG, "BMP280: T=%.2f C, P=%.2f hPa; t=%lld us",
-                         (double)lectura.temperatura_c, (double)lectura.presion_hpa,
-                         (long long)lectura.instante_us);
-            }
-        } else {
-            ESP_LOGW(TAG, "Muestra no valida: %s", esp_err_to_name(err));
-        }
-        xTaskDelayUntil(&proximo, periodo);
-    }
-}
-
 esp_err_t bme280_iniciar(const bme280_config_t *config)
 {
     if (config == NULL || s_bus != NULL ||
@@ -321,10 +280,6 @@ esp_err_t bme280_iniciar(const bme280_config_t *config)
     s_estado.direccion = config->direccion;
     s_estado.tiene_humedad = (id == ID_BME280);
 
-    if (xTaskCreate(tarea_bme280, "tarea_bme280", 4096, NULL, 3, NULL) != pdPASS) {
-        err = ESP_ERR_NO_MEM;
-        goto fallo;
-    }
     ESP_LOGI(TAG, "Muestreo cada %lu ms; bus a %u Hz",
              (unsigned long)s_periodo_ms, (unsigned)I2C_HZ);
     return ESP_OK;
@@ -342,6 +297,53 @@ fallo:
     s_bus = NULL;
     return err;
 }
+
+
+esp_err_t bme280_leer(void)
+{
+    if (s_mutex == NULL ||
+        s_dispositivo == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    bme280_estado_t lectura = {0};
+
+    /* La lectura fisica se ejecuta en P2. */
+    esp_err_t err = leer_muestra(&lectura);
+
+    if (xSemaphoreTake(
+            s_mutex, portMAX_DELAY
+        ) != pdTRUE) {
+        return ESP_FAIL;
+    }
+
+    if (err == ESP_OK) {
+
+        s_estado.temperatura_c =
+            lectura.temperatura_c;
+
+        s_estado.presion_hpa =
+            lectura.presion_hpa;
+
+        s_estado.humedad_pct =
+            lectura.humedad_pct;
+
+        s_estado.instante_us =
+            lectura.instante_us;
+
+        s_estado.muestra_valida = true;
+
+    } else {
+
+        s_estado.muestra_valida = false;
+        ++s_estado.errores_lectura;
+    }
+
+    xSemaphoreGive(s_mutex);
+
+    return err;
+}
+
 
 esp_err_t bme280_obtener_estado(bme280_estado_t *estado)
 {

@@ -38,4 +38,6 @@ esp_err_t bme280_obtener_estado(
     bme280_estado_t *estado
 );
 
+esp_err_t bme280_leer(void);
+
 #endif

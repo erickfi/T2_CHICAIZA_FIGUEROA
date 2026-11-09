@@ -18,6 +18,8 @@
 #include "led.h"
 #include "pulsador.h"
 #include "bme280.h"
+#include "carga.h"
+#include "periodica.h"
 
 #define CONSOLA_UART UART_NUM_0
 #define CONSOLA_RX_BUFFER 2048
@@ -83,6 +85,14 @@ static void comando_led(
     int argc, char *argv[]
 );
 
+static void comando_carga(
+    int argc, char *argv[]
+);
+
+static void comando_periodica(
+    int argc, char *argv[]
+);
+
 /* Tabla centralizada de comandos. */
 static const comando_t comandos[] = {
     {
@@ -100,6 +110,18 @@ static const comando_t comandos[] = {
         "led off|medio|on|fade|next   Controla LEDC",
         comando_led
     }
+  
+    {
+        "carga",
+        "carga stop|turnos|inanicion|corregida   Controla P1",
+        comando_carga
+    },
+    {
+        "periodica",
+        "periodica             Muestra los ultimos resumenes de P2",
+        comando_periodica
+    }    
+
 };
 
 static void comando_ayuda(
@@ -287,6 +309,134 @@ static void comando_led(
         );
     }
 }
+
+
+/* Nombre legible del modo de carga. */
+static const char *nombre_carga(carga_modo_t modo)
+{
+    switch (modo) {
+        case CARGA_PARADA:
+            return "parada";
+        case CARGA_TURNOS:
+            return "turnos";
+        case CARGA_INANICION:
+            return "inanicion";
+        case CARGA_CORREGIDA:
+            return "corregida";
+        default:
+            return "desconocido";
+    }
+}
+
+/* P1: seleccion de los cuatro modos. */
+static void comando_carga(int argc, char *argv[])
+{
+    if (argc != 2) {
+        enviar(
+            "Uso: carga stop|turnos|inanicion|corregida\r\n"
+        );
+        return;
+    }
+
+    carga_modo_t modo;
+
+    if (strcmp(argv[1], "stop") == 0) {
+        modo = CARGA_PARADA;
+
+    } else if (strcmp(argv[1], "turnos") == 0) {
+        modo = CARGA_TURNOS;
+
+    } else if (strcmp(argv[1], "inanicion") == 0) {
+        modo = CARGA_INANICION;
+
+    } else if (strcmp(argv[1], "corregida") == 0) {
+        modo = CARGA_CORREGIDA;
+
+    } else {
+        enviar(
+            "Uso: carga stop|turnos|inanicion|corregida\r\n"
+        );
+        return;
+    }
+
+    esp_err_t err = carga_fijar_modo(modo);
+
+    if (err == ESP_OK) {
+        enviar_formato(
+            "Carga: modo %s solicitado\r\n",
+            nombre_carga(modo)
+        );
+    } else {
+        enviar_formato(
+            "Error de carga: %s\r\n",
+            esp_err_to_name(err)
+        );
+    }
+}
+
+/*
+ * P2: muestra el ultimo resumen completo
+ * de cada modo, sin cambiar la carga actual.
+ */
+static void comando_periodica(int argc, char *argv[])
+{
+    (void)argv;
+
+    if (argc != 1) {
+        enviar("Uso: periodica\r\n");
+        return;
+    }
+
+    for (int i = CARGA_PARADA;
+         i <= CARGA_CORREGIDA;
+         ++i) {
+
+        carga_modo_t modo = (carga_modo_t)i;
+        periodica_resumen_t r = {0};
+
+        esp_err_t err =
+            periodica_ultimo_resumen(modo, &r);
+
+        if (err == ESP_ERR_NOT_FOUND) {
+            enviar_formato(
+                "%s: sin resumen completo\r\n",
+                nombre_carga(modo)
+            );
+            continue;
+        }
+
+        if (err != ESP_OK) {
+            enviar_formato(
+                "%s: error %s\r\n",
+                nombre_carga(modo),
+                esp_err_to_name(err)
+            );
+            continue;
+        }
+
+        enviar_formato(
+            "%s: activaciones=%" PRIu32
+            ", intervalos=%" PRIu32
+            ", rebases=%" PRIu32
+            ", errores=%" PRIu32 "\r\n",
+            nombre_carga(modo),
+            r.activaciones,
+            r.intervalos,
+            r.rebases,
+            r.errores_sensor
+        );
+
+        enviar_formato(
+            "  medio=%.3f, minimo=%.3f, "
+            "maximo=%.3f, jitter=%.3f ms\r\n",
+            r.medio_ms,
+            r.minimo_ms,
+            r.maximo_ms,
+            r.jitter_ms
+        );
+    }
+}
+
 
 /* Analizador de lineas existente. */
 static void ejecutar_linea(char *linea)
