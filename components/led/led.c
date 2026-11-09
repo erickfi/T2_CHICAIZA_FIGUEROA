@@ -28,15 +28,19 @@ static const char *TAG = "LEDC";
 #define LED_TAREA_PILA_BYTES   4096U
 #define LED_TAREA_PRIORIDAD    5U
 
+
 typedef enum {
     ORDEN_FIJAR_MODO,
-    ORDEN_SIGUIENTE_MODO
+    ORDEN_SIGUIENTE_MODO,
+    ORDEN_FIJAR_DUTY
 } led_orden_tipo_t;
 
 typedef struct {
     led_orden_tipo_t tipo;
     led_modo_t modo;
+    uint32_t porcentaje;
 } led_orden_t;
+
 
 static QueueHandle_t s_cola = NULL;
 static SemaphoreHandle_t s_mutex_estado = NULL;
@@ -56,6 +60,8 @@ static const char *nombre_modo(led_modo_t modo)
             return "encendido";
         case LED_MODO_TRANSICION:
             return "transicion";
+        case LED_MODO_MANUAL:
+            return "manual";
         default:
             return "desconocido";
     }
@@ -184,10 +190,57 @@ static esp_err_t aplicar_modo(led_modo_t modo)
     return ESP_OK;
 }
 
+
+/*
+ * P4: aplica un porcentaje solicitado desde consola.
+ * Solo la tarea LEDC ejecuta esta funcion.
+ */
+static esp_err_t aplicar_duty_porcentaje(
+    uint32_t porcentaje
+)
+{
+    if (porcentaje > 100U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Conversion de porcentaje a pasos de 13 bits. */
+    const uint32_t duty =
+        (porcentaje * LEDC_DUTY_TOTAL + 50U) / 100U;
+
+    /*
+     * fijar_duty() ya llama a ledc_fade_stop()
+     * antes de actualizar el canal.
+     */
+    esp_err_t err = fijar_duty(duty);
+
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    xSemaphoreTake(s_mutex_estado, portMAX_DELAY);
+
+    s_modo = LED_MODO_MANUAL;
+    s_duty_objetivo = duty;
+
+    xSemaphoreGive(s_mutex_estado);
+
+    ESP_LOGI(
+        TAG,
+        "P4: duty manual=%lu%% (%lu/%lu)",
+        (unsigned long)porcentaje,
+        (unsigned long)duty,
+        (unsigned long)LEDC_DUTY_TOTAL
+    );
+
+    return ESP_OK;
+}
+
+
 /*
  * Unica tarea que controla el canal LEDC.
  * No realiza espera activa: se bloquea en la cola.
  */
+
 static void tarea_ledc(void *argumento)
 {
     (void)argumento;
@@ -195,6 +248,7 @@ static void tarea_ledc(void *argumento)
     led_orden_t orden;
 
     for (;;) {
+
         if (xQueueReceive(
                 s_cola,
                 &orden,
@@ -203,26 +257,47 @@ static void tarea_ledc(void *argumento)
             continue;
         }
 
-        led_modo_t destino;
+        esp_err_t err;
 
-        if (orden.tipo == ORDEN_SIGUIENTE_MODO) {
-            /* s_modo solo lo modifica esta tarea. */
-            destino = siguiente_modo(s_modo);
+        if (orden.tipo == ORDEN_FIJAR_DUTY) {
+
+            /* P4: duty solicitado desde consola. */
+            err = aplicar_duty_porcentaje(
+                orden.porcentaje
+            );
+
         } else {
-            destino = orden.modo;
-        }
 
-        esp_err_t err = aplicar_modo(destino);
+            led_modo_t destino;
+
+            if (orden.tipo == ORDEN_SIGUIENTE_MODO) {
+
+                destino = siguiente_modo(s_modo);
+
+            } else if (orden.tipo == ORDEN_FIJAR_MODO) {
+
+                destino = orden.modo;
+
+            } else {
+
+                ESP_LOGW(TAG, "Orden LED desconocida");
+                continue;
+            }
+
+            /* P3: modos originales. */
+            err = aplicar_modo(destino);
+        }
 
         if (err != ESP_OK) {
             ESP_LOGE(
                 TAG,
-                "Error aplicando modo: %s",
+                "Error aplicando orden LED: %s",
                 esp_err_to_name(err)
             );
         }
     }
 }
+
 
 esp_err_t led_iniciar(const led_config_t *config)
 {
@@ -418,4 +493,22 @@ esp_err_t led_obtener_estado(led_estado_t *estado)
     xSemaphoreGive(s_mutex_estado);
 
     return ESP_OK;
+}
+
+
+esp_err_t led_fijar_duty_porcentaje(
+    uint32_t porcentaje
+)
+{
+    if (porcentaje > 100U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    led_orden_t orden = {
+        .tipo = ORDEN_FIJAR_DUTY,
+        .modo = LED_MODO_MANUAL,
+        .porcentaje = porcentaje
+    };
+
+    return enviar_orden(&orden);
 }

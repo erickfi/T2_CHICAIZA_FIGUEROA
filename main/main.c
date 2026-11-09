@@ -14,6 +14,7 @@
 #include "periodica.h"
 #include "pines.h"
 #include "pulsador.h"
+#include "temporizadores.h"
 
 static const char *TAG = "MAIN";
 
@@ -102,6 +103,7 @@ void app_main(void)
     }
 
     /* Consola comun P1, P2 y P3. */
+    ESP_ERROR_CHECK(temporizadores_iniciar(10U));
     ESP_ERROR_CHECK(consola_iniciar());
 
     /* Comprobacion inicial de lectura real. */

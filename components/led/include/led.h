@@ -11,7 +11,8 @@ typedef enum {
     LED_MODO_APAGADO = 0,
     LED_MODO_INTERMEDIO,
     LED_MODO_ENCENDIDO,
-    LED_MODO_TRANSICION
+    LED_MODO_TRANSICION,
+    LED_MODO_MANUAL
 } led_modo_t;
 
 /* Configuracion electrica proporcionada por main.c. */
@@ -39,5 +40,8 @@ esp_err_t led_siguiente_modo(void);
 
 /* Obtiene una copia coherente del estado logico. */
 esp_err_t led_obtener_estado(led_estado_t *estado);
+
+/* P4: encola un duty de 0 a 100 %, sin acceder a LEDC. */
+esp_err_t led_fijar_duty_porcentaje(uint32_t porcentaje);
 
 #endif
