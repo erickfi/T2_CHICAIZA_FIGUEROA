@@ -153,6 +153,7 @@ Las pruebas se realizarán en modo parada y en modo turnos, comparando los resul
 Para finalizar la integración será necesario confirmar la compilación limpia, ejecutar las pruebas de P1 y P2 con P3 funcionando, registrar las medidas de jitter y rebases, comprobar el watchdog y medir la pila mínima libre de cada tarea.
 
 <img width="1199" height="1312" alt="imagen" src="https://github.com/user-attachments/assets/108f631f-edd3-4a68-9d2b-03b22b882b16" />
+<img width="1672" height="941" alt="imagen" src="https://github.com/user-attachments/assets/53f00717-a0da-4426-ac32-bd253e4dde54" />
 
 
 
