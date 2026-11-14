@@ -121,6 +121,16 @@ Los cuatro modos son apagado, brillo intermedio, encendido y transición hardwar
 
 Solo la tarea propietaria de LEDC modifica el duty o inicia transiciones. La consola y el pulsador envían órdenes a dicha tarea.
 
+### P4 - Temporizadores
+
+En esta práctica se comparan los temporizadores esp_timer y los temporizadores software de FreeRTOS, utilizando el mismo periodo de aproximadamente 10 ms.
+
+Ambos mecanismos registrarán sus instantes de activación mediante esp_timer_get_time() y enviarán los datos a una cola. Una tarea en CPU1 calculará el periodo medio, mínimo y máximo, así como el jitter, utilizando ventanas de 50 activaciones.
+
+Se configurará la tarea de servicio de temporizadores de FreeRTOS en CPU0 para que comparta núcleo con las tareas de carga. Además, se ampliará la consola para modificar el periodo de los temporizadores, consultar sus estadísticas y controlar el LED.
+
+Las pruebas se realizarán en modo parada y en modo turnos, comparando los resultados obtenidos. Se espera que el temporizador software presente mayor jitter bajo carga, debido a que depende de una tarea de servicio de menor prioridad, mientras que esp_timer utiliza un servicio de mayor prioridad.
+
 ### Comandos de consola
 
 | Comando | Función |
