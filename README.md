@@ -152,9 +152,9 @@ Las pruebas se realizarán en modo parada y en modo turnos, comparando los resul
 
 Para finalizar la integración será necesario confirmar la compilación limpia, ejecutar las pruebas de P1 y P2 con P3 funcionando, registrar las medidas de jitter y rebases, comprobar el watchdog y medir la pila mínima libre de cada tarea.
 
-También se incorporarán la lista de tareas (`vTaskList()`) y las estadísticas de ejecución (`vTaskGetRunTimeStats()`), según el apartado 6.5 del guion.
+<img width="1199" height="1312" alt="imagen" src="https://github.com/user-attachments/assets/108f631f-edd3-4a68-9d2b-03b22b882b16" />
 
-Los valores medidos se incorporarán a este README sin sustituirlos por estimaciones.
+
 
 ### Referencias y asistencia
 
