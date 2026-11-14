@@ -85,6 +85,33 @@ Los tamaños de pila son valores de configuración iniciales y deberán validars
 | PWM LEDC | 5000 Hz, 13 bits |
 | Transición LEDC | 1500 ms solicitados, precedidos por 400 ms de apagado |
 
+### Instrucciones de compilación y grabación
+
+El proyecto se ha desarrollado utilizando una placa ESP32-S3, Visual Studio Code y la extensión Espressif IDF, con ESP-IDF 5.5.
+
+Para compilar el proyecto, se debe abrir la carpeta del proyecto desde Visual Studio Code, seleccionar el objetivo esp32s3 y ejecutar la compilación mediante la extensión Espressif IDF. También se puede realizar desde la terminal:
+
+idf.py set-target esp32s3
+idf.py build
+
+Una vez compilado, se conecta la placa al ordenador mediante USB y se selecciona el puerto serie correspondiente. Para grabar el firmware y abrir el monitor serie se puede utilizar:
+
+idf.py -p COMx flash monitor
+
+Se debe sustituir COMx por el puerto asignado a la placa. Desde el monitor serie se pueden consultar los mensajes de funcionamiento e introducir los comandos disponibles.
+
+###Justificación del periodo de muestreo del BME280
+
+El sensor BME280 se configura con un periodo de muestreo de 1000 ms. Este intervalo permite obtener lecturas periódicas de temperatura, presión y humedad sin realizar consultas innecesariamente frecuentes.
+
+El tiempo de conversión depende de la configuración interna del sensor, pero el intervalo de un segundo permite completar las mediciones antes de solicitar una nueva muestra. Además, las magnitudes ambientales medidas cambian relativamente despacio, por lo que no es necesario adquirir datos a una frecuencia elevada. Este periodo resulta adecuado para supervisar las condiciones ambientales y visualizar su evolución mediante la consola.
+
+### Montaje del LED
+
+El LED externo se conecta al GPIO 4 de la placa ESP32-S3. Para limitar la corriente se coloca una resistencia en serie con el LED. El ánodo del LED se conecta a la salida GPIO 4 a través de la resistencia, mientras que el cátodo se conecta a GND.
+
+La señal de salida permite controlar el encendido y apagado del LED. Además, mediante el periférico LEDC se puede regular su brillo utilizando una señal PWM de 5000 Hz y una resolución de 13 bits.
+
 ### P1 — Tareas y prioridades
 
 Se crean dos tareas de carga en CPU0. En modo turnos, ambas tienen prioridad 2 y alternan una ráfaga de cálculo con una espera bloqueada.
