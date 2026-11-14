@@ -100,7 +100,7 @@ idf.py -p COMx flash monitor
 
 Se debe sustituir COMx por el puerto asignado a la placa. Desde el monitor serie se pueden consultar los mensajes de funcionamiento e introducir los comandos disponibles.
 
-###Justificación del periodo de muestreo del BME280
+### Justificación del periodo de muestreo del BME280
 
 El sensor BME280 se configura con un periodo de muestreo de 1000 ms. Este intervalo permite obtener lecturas periódicas de temperatura, presión y humedad sin realizar consultas innecesariamente frecuentes.
 
